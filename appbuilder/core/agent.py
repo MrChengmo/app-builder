@@ -239,17 +239,21 @@ class AgentRuntime(BaseModel):
             # 根据component是否lazy_certification，分成两种情况：
             # 1. lazy_certification为True，初始化时未被认证，每次请求都需要带入AppbuilderToken
             # 2. lazy_certification为False，初始化时已经认证，请求时不需要带入AppbuilderToken，并且带入也无效
-            if self.component.lazy_certification:
-                if "X-Appbuilder-Token" not in request.headers:
-                    raise BadRequest("X-Appbuilder-Token is required in Headers")
-                try:
-                    app_builder_token = request.headers["X-Appbuilder-Token"]
-                    self.component.set_secret_key_and_gateway(secret_key=app_builder_token)
-                except appbuilder.core._exception.BaseRPCException as e:
-                    raise BadRequest("X-Appbuilder-Token invalid")
-            else:
-                pass
+            if not isinstance(self.component, list):
+                self.component = [self.component]
 
+            for component in self.component:
+                if component.lazy_certification:
+                    if "X-Appbuilder-Token" not in request.headers:
+                        raise BadRequest("X-Appbuilder-Token is required in Headers")
+                    try:
+                        app_builder_token = request.headers["X-Appbuilder-Token"]
+                        component.set_secret_key_and_gateway(secret_key=app_builder_token)
+                    except appbuilder.core._exception.BaseRPCException as e:
+                        raise BadRequest("X-Appbuilder-Token invalid")
+                else:
+                    pass
+            
             data = request.get_json()
             if "message" not in data:
                 raise BadRequest("message is required")
