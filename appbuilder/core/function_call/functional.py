@@ -15,25 +15,13 @@ import json
 import os
 import uuid
 from appbuilder.core.agent import AgentRuntime
-from appbuilder.core.component import Component
 from appbuilder.core.context import init_context
 from appbuilder.core.user_session import UserSession
 from appbuilder.core.message import Message
 from appbuilder.core._client import HTTPClient
-from appbuilder.utils.sse_util import SSEClient
-from appbuilder.core.components.llms.base import CompletionResponse
-from appbuilder.core._exception import AppBuilderServerException
 
-
-class FunctionCallEventType(object):
-    """
-    FunctionCallEventType, 函数调用事件类型
-    """
-    LOCAL_FUNCTION_CALL = "local_function_call"  # 调用本地的函数实现
-    LOCAL_FUNCTION_CALL_RESULTS = "local_function_call_results"  # 本地调用函数的实现结果
-    REMOTE_FUNCTION_CALL = "remote_function_call"  # 调用远程的函数实现
-    REMOTE_FUNCTION_CALL_RESULTS = "remote_function_call"  # 远程调用函数的实现结果
-    FUNCTION_CALL_COMPLETED = "function_call_completed"  # 函数调用过程完成
+from appbuilder.core.function_call.base import FunctionCallEventType
+from appbuilder.core.function_call.base import FunctionCallResponse
 
 
 class FunctionCall(AgentRuntime):
@@ -64,7 +52,9 @@ class FunctionCall(AgentRuntime):
 
         chat_res = Message()
         used_tool = []
-        while True:
+
+        # while True:
+        if True:
             request_id = str(uuid.uuid4())
             init_context(session_id=conversation_id, request_id=request_id)
 
@@ -74,7 +64,6 @@ class FunctionCall(AgentRuntime):
             self.user_session.append({})
 
             for event in events:
-                # Todo(chengmo): 定义event.type
                 if event.type == FunctionCallEventType.LOCAL_FUNCTION_CALL:  # 本地调用的FuncCall
                     tool_result = eval(event.content["func"])(
                         event.content["arguments"])
@@ -83,15 +72,14 @@ class FunctionCall(AgentRuntime):
                 else:
                     print(event.content)  # user visible results
 
-            if tool_result == "" and used_tool == []:
-                break
+            # if tool_result == "" and used_tool == []:
+            #     break
 
             # Todo(chengmo): 根据tool_result和used_tool，组装新的message
 
         return chat_res
 
     def run(self, message: Message, instruction: str = "", tools: list(str) = [], conversation_id: str = "", stream: bool = False):
-
         # Todo(chengmo): 创建并处理 used_tools
         request_message = self._request_message_encoder(
             message, instruction=instruction, tools=tools, conversation_id=conversation_id, stream=stream)
@@ -138,125 +126,6 @@ class FunctionCall(AgentRuntime):
             "model_configs": model_configs
         })
 
-
-class FunctionCallResponse(CompletionResponse):
-    error_no = 0
-    error_msg = ""
-    result = None
-    log_id = ""
-    extra = None
-    conversation_id = ""
-
-    
-
-    def __init__(self, response, stream: bool = False):
-        """初始化客户端状态。"""
-        super().__init__(response, stream)
-        
-        if stream:
-            self.parse_stream_data(response)
-        else:
-            self.parse_block_data(response)
-    
-    def parse_stream_data(self, response):
-        def stream_data():
-            sse_client = SSEClient(response)
-            for event in sse_client.events():
-                if not event:
-                    continue
-                answer = self.parse_stream_data(event)
-                if answer is not None:
-                    yield answer
-
-        self.result = stream_data()
-
-    def parse_block_data(self, response):
-        if response.status_code != 200:
-            self.error_no = response.status_code
-            self.error_msg = "error"
-            self.result = response.text
-        
-            raise AppBuilderServerException(self.log_id, self.error_no, self.result)
-        else:
-            data = response.json()
-            data = response.json()
-
-            if "code" in data and data.get("code") != 0:
-                raise AppBuilderServerException(self.log_id, data["code"], data["message"])
-
-            if "code" in data and "message" in data and "requestId" in data:
-                raise AppBuilderServerException(self.log_id, data["code"], data["message"])
-
-            if "code" in data and "message" in data and "status" in data:
-                raise AppBuilderServerException(self.log_id, data["code"], data["message"])
-
-            self.result = data.get("result").get("answer", None)
-            self.conversation_id = data.get("result").get("conversation_id", "")
-            content = data.get("result").get("content", None)
-            res = self.parse_func_event_data(content)
-        
-    def parse_func_event_data(self, content:dict ={}):
-        if not content:
-            return
-        
-        for item in content:
-            event = item.get("event", "")
-            event_type = item.get("event_type", "")
-            text = item.get("text", "")
-            event_status = item.get("event_status", "")
-            evetn_message = item.get("event_message", "")
-            event_id = item.get("event_id", -1)
-
-class FunctionCollector(object):
-    _instance = None
-    _initialized = False
-
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-        self._enable_function = {}
-
-    def __new__(cls, *args, **kwargs):
-        """
-        单例模式
-        """
-        if cls._instance is None:
-            cls._instance = object.__new__(cls)
-        return cls._instance
-
-    def register_builtin_function(self, function: Component):
-        """
-        注册内置函数
-        """
-        if not isinstance(function, Component):
-            raise TypeError("Function must be a subclass of Component")
-        pass
-
-    def register_custom_function(self, function: Component):
-        """
-        注册自定义函数
-        """
-        if not isinstance(function, Component):
-            raise TypeError("Function must be a subclass of Component")
-
-    def get_function_impl_by_name(self, func_name: str) -> Component:
-        """
-        根据函数名获取函数实现
-        """
-        pass
-
-    def get_total_function(self) -> list[str]:
-        """
-        获取已注册的函数名列表
-        """
-        pass
-
-    def get_enable_function(self) -> list[str]:
-        """
-        获取当前用户可用的func列表
-        """
-        pass
 
 
 if __name__ == "__main__":
