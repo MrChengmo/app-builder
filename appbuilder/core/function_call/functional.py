@@ -20,18 +20,20 @@ from appbuilder.core.context import init_context
 from appbuilder.core.user_session import UserSession
 from appbuilder.core.message import Message
 from appbuilder.core._client import HTTPClient
-from appbuilder.core.components.llms.base import CompletionResponse, LLMMessage
+from appbuilder.utils.sse_util import SSEClient
+from appbuilder.core.components.llms.base import CompletionResponse
+from appbuilder.core._exception import AppBuilderServerException
 
 
 class FunctionCallEventType(object):
     """
     FunctionCallEventType, 函数调用事件类型
     """
-    LOCAL_FUNCTION_CALL = "local_function_call" # 调用本地的函数实现
-    LOCAL_FUNCTION_CALL_RESULTS = "local_function_call_results" # 本地调用函数的实现结果
-
-    REMOTE_FUNCTION_CALL = "remote_function_call" # 调用远程的函数实现
-    REMOTE_FUNCTION_CALL_RESULTS = "remote_function_call" # 远程调用函数的实现结果
+    LOCAL_FUNCTION_CALL = "local_function_call"  # 调用本地的函数实现
+    LOCAL_FUNCTION_CALL_RESULTS = "local_function_call_results"  # 本地调用函数的实现结果
+    REMOTE_FUNCTION_CALL = "remote_function_call"  # 调用远程的函数实现
+    REMOTE_FUNCTION_CALL_RESULTS = "remote_function_call"  # 远程调用函数的实现结果
+    FUNCTION_CALL_COMPLETED = "function_call_completed"  # 函数调用过程完成
 
 
 class FunctionCall(AgentRuntime):
@@ -56,36 +58,43 @@ class FunctionCall(AgentRuntime):
 
     def chat(self, message: Message,
              instruction: str = "", tools: list(str) = [], conversation_id: str = "", stream: bool = False, **args) -> Message:
-        
+
+        if conversation_id == "":
+            conversation_id = str(uuid.uuid4())
+
         chat_res = Message()
         used_tool = []
-        while True:       
+        while True:
+            request_id = str(uuid.uuid4())
+            init_context(session_id=conversation_id, request_id=request_id)
+
             events = self.run(message, instruction=instruction, tools=tools,
-                                conversation_id=conversation_id, stream=stream)
+                              conversation_id=conversation_id, stream=stream)
+            
+            self.user_session.append({})
 
             for event in events:
                 # Todo(chengmo): 定义event.type
-                if event.type == FunctionCallEventType.LOCAL_FUNCTION_CALL: #本地调用的FuncCall
-                    tool_result = eval(event.content["func"])(event.content["arguments"])
+                if event.type == FunctionCallEventType.LOCAL_FUNCTION_CALL:  # 本地调用的FuncCall
+                    tool_result = eval(event.content["func"])(
+                        event.content["arguments"])
                 elif event.type == FunctionCallEventType.REMOTE_FUNCTION_CALL_RESULTS:
                     used_tool.append(event.content)
                 else:
-                    print(event.content) # user visible results
-            
+                    print(event.content)  # user visible results
+
             if tool_result == "" and used_tool == []:
                 break
 
+            # Todo(chengmo): 根据tool_result和used_tool，组装新的message
+
         return chat_res
 
-    def run(self, message: Message, instruction: str = "", tools: list(str) = [], conversation_id: str = "", stream: bool = False):     
-        if conversation_id == "":
-            conversation_id = str(uuid.uuid4())
-        request_id = str(uuid.uuid4())
-        init_context(session_id=conversation_id, request_id=request_id)
-        
+    def run(self, message: Message, instruction: str = "", tools: list(str) = [], conversation_id: str = "", stream: bool = False):
+
         # Todo(chengmo): 创建并处理 used_tools
         request_message = self._request_message_encoder(
-            message, instruction=instruction, stream=stream)
+            message, instruction=instruction, tools=tools, conversation_id=conversation_id, stream=stream)
         payload = json.dumps(request_message.content)
 
         headers = self.http_client.auth_header()
@@ -96,27 +105,28 @@ class FunctionCall(AgentRuntime):
             url=self.http_client.service_url(self.integrated_url),
             headers=headers,
             data=payload)
-        response_message = self._response_message_decoder(response, stream)
+        response = FunctionCallResponse(response, stream)
+    
+        return response.to_message()
 
-
-        self.user_session.append({})
-        return response_message
-
-    def _request_message_encoder(self, message: Message, instruction: str = "", stream: bool = False) -> dict[str, str]:
-        query = message.content  # 用户输入
+    def _request_message_encoder(self, message: Message, instruction: str = "", tools: list(str) = [], conversation_id: str = "", stream: bool = False) -> dict[str, str]:
+        query = message.content
         response_mode = "streaming" if stream else "blocking"
-        # Todo(chengmo): 获取或者新建conversation_id
-        conversation_id = ""
+        conversation_id = conversation_id
         # Todo(chengmo): 获取或者新建user_id
-        user_id = ""
-
+        user_id = "80c5bbee-931d-4ed9-a4ff-63e1971bd079"
         inputs = {
             "function_call.user_instruction": "",
             "function_call.builtin_tool_list": []
         }
         inputs["function_call.user_instruction"] = instruction
 
-        # Todo(chengmo): 获取或者新建builtin_tool_list
+        for tool in tools:
+            inputs["function_call.builtin_tool_list"].append({
+                "agent_name": tool,
+                "agent_config": {}
+            })
+
         model_configs = {}
 
         return Message({
@@ -128,25 +138,74 @@ class FunctionCall(AgentRuntime):
             "model_configs": model_configs
         })
 
-    def _response_message_decoder(self, response: dict[str, str]) -> Message:
-        pass
-
-
-class FunctionCallMessage(LLMMessage):
-    converstation_id: str = ""
-
-    def __str__(self):
-        pass
-
 
 class FunctionCallResponse(CompletionResponse):
-    converstation_id: str = ""
+    error_no = 0
+    error_msg = ""
+    result = None
+    log_id = ""
+    extra = None
+    conversation_id = ""
+
+    
 
     def __init__(self, response, stream: bool = False):
         """初始化客户端状态。"""
         super().__init__(response, stream)
-        pass
+        
+        if stream:
+            self.parse_stream_data(response)
+        else:
+            self.parse_block_data(response)
+    
+    def parse_stream_data(self, response):
+        def stream_data():
+            sse_client = SSEClient(response)
+            for event in sse_client.events():
+                if not event:
+                    continue
+                answer = self.parse_stream_data(event)
+                if answer is not None:
+                    yield answer
 
+        self.result = stream_data()
+
+    def parse_block_data(self, response):
+        if response.status_code != 200:
+            self.error_no = response.status_code
+            self.error_msg = "error"
+            self.result = response.text
+        
+            raise AppBuilderServerException(self.log_id, self.error_no, self.result)
+        else:
+            data = response.json()
+            data = response.json()
+
+            if "code" in data and data.get("code") != 0:
+                raise AppBuilderServerException(self.log_id, data["code"], data["message"])
+
+            if "code" in data and "message" in data and "requestId" in data:
+                raise AppBuilderServerException(self.log_id, data["code"], data["message"])
+
+            if "code" in data and "message" in data and "status" in data:
+                raise AppBuilderServerException(self.log_id, data["code"], data["message"])
+
+            self.result = data.get("result").get("answer", None)
+            self.conversation_id = data.get("result").get("conversation_id", "")
+            content = data.get("result").get("content", None)
+            res = self.parse_func_event_data(content)
+        
+    def parse_func_event_data(self, content:dict ={}):
+        if not content:
+            return
+        
+        for item in content:
+            event = item.get("event", "")
+            event_type = item.get("event_type", "")
+            text = item.get("text", "")
+            event_status = item.get("event_status", "")
+            evetn_message = item.get("event_message", "")
+            event_id = item.get("event_id", -1)
 
 class FunctionCollector(object):
     _instance = None
