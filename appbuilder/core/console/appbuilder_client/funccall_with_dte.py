@@ -33,6 +33,27 @@ os.environ["APPBUILDER_TOKEN"]= "bce-v3/ALTAK-boyiIC3WpU8783XpRoBYE/bcef8b3da5b6
 TRACE_ID = str(uuid.uuid4())
 
 
+tools =[
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "仅支持中国城市的天气查询，参数location为中国城市名称，其他国家城市不支持天气查询",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. Beijing",
+                        },
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location", "unit"],
+                },
+            },
+        }
+    ]
+
 class ChatHistory(BaseModel):
     query: str = Field("", description='用户输入的文本')
     answer: str = Field("", description='模型返回的文本')
@@ -238,42 +259,57 @@ class DTEFunctionCallAgent(Component):
         new_json_dict["inputs"] = input_dict
         return new_json_dict
 
+dte_function_call_agent = DTEFunctionCallAgent()
+conversation_id = dte_function_call_agent.create_conversation()
 
-if __name__ == '__main__':
 
-    dte_function_call_agent = DTEFunctionCallAgent()
+def dte_run(query, chat_history = None, used_tool = None):
 
-    image_url = "https://bj.bcebos.com/v1/appbuilder/animal_recognize_test.png?" \
-                "authorization=bce-auth-v1%2FALTAKGa8m4qCUasgoljdEDAzLm%2F2024-01-24T" \
-                "12%3A19%3A16Z%2F-1%2Fhost%2F411bad53034fa8f9c6edbe5c4909d76ecf6fad68" \
-                "62cf937c03f8c5260d51c6ae"
-
-    query = "我有一张图片，url是: {}, 麻烦帮我看看这是什么动物".format(image_url)
-    print("\nquery: {}\n".format(query))
-
-    conversation_id = dte_function_call_agent.create_conversation()
-    inputs = IntegratedInputs(
+    if chat_history and used_tool:
+        inputs = IntegratedInputs(
         function_call_plugin_tool_list=[
-                PluginTool(
-                    component_name="animal_rec",
-                    component_manifest=AnimalRecognition().manifests
-                )
-            ]
-    )
+                {
+                    "component_name": "get_current_weather",
+                    "component_manifest": tools
+                }
+            ],
+            function_call_contexts=FunctionCallContexts(
+                chat_history=chat_history,
+                used_tool=used_tool
+            )
+        )
+    else:
+        inputs = IntegratedInputs(
+            function_call_plugin_tool_list=[
+                    PluginTool(
+                        component_name="get_current_weather",
+                        component_manifest=tools
+                    )
+                ]
+        )
     model_configs = IntegratedModelConfigs(
         thought_model_config=ModelDefinition(name="eb-4",),
         rag_model_config=ModelDefinition(name="eb-4")
     )
 
-    begin_time = time.time()
     res = dte_function_call_agent.run(
         conversation_id=conversation_id,
         query=query,
         model_configs=model_configs,
         inputs=inputs
     )
+
+    return res
+
+if __name__ == '__main__':
+
+    query = "今天北京的天气怎么样？"
+    print("\nquery: {}\n".format(query))
+    
     func_args = {}
     function_call_context = {}
+
+    res = dte_run(query)
 
     for r in res:
         print("\n",r)
@@ -288,44 +324,46 @@ if __name__ == '__main__':
     print("function_call_context: ", function_call_context)
     print("\n")
     os.environ["APPBUILDER_TOKEN"] = "bce-v3/ALTAK-n5AYUIUJMarF7F7iFXVeK/1bf65eed7c8c7efef9b11388524fa1087f90ea58"
-    func_res = AnimalRecognition().tool_eval(
-        name="animal_rec",
-        streaming=True,
-        origin_query=query,
-        **func_args
-    )
-    func_message = ""
-    for res in func_res:
-        func_message += res
+    
+    func_message = "北京今天有人自杀"
     tool_eval_time = time.time()
     print("func_message: ", func_message)
     print("\n")
     print(" ---- 返回函数结果，远程继续执行！---- ")
-    os.environ["APPBUILDER_TOKEN"]= "bce-v3/ALTAK-boyiIC3WpU8783XpRoBYE/bcef8b3da5b60aa2be0674539ef06f10e47d5613"
-    inputs = IntegratedInputs(
-        function_call_plugin_tool_list=[
-            {
-                "component_name": "animal_rec",
-                "component_manifest": AnimalRecognition().manifests
-            }
-        ],
-        function_call_contexts=FunctionCallContexts(
-            chat_history=[ChatHistory(
+
+    chat_history = [ChatHistory(
                 query=query,
                 answer=""
-            )],
-            used_tool=[UsedTool(
+            )]
+    
+    used_tool=[UsedTool(
                 function_call=function_call_context,
                 function_resp=func_message
             )]
-        )
-    )
-    res = dte_function_call_agent.run(
-        conversation_id=conversation_id,
-        query="",
-        model_configs=model_configs,
-        inputs=inputs
-    )
+
+    res = dte_run(query, chat_history, used_tool)
+    for r in res:
+        print("\n",r)
+        for c in r.result.content:
+            if c.event == 'Interrupt':
+                func_args = c.text.get("function_call", {}).get("arguments", {})
+                
+                function_call_context_2 = c.text.get("function_call", "")
+    print("\n ---- 函数本地执行！---- ")
+    print("func_args: ", func_args)
+    print("function_call_context: ", function_call_context_2)
+
+    func_message_2 = "北京今天天气晴朗，35度"
+    used_tool=[UsedTool(
+                function_call=function_call_context,
+                function_resp=func_message
+            ),
+            UsedTool(
+                function_call=function_call_context_2,
+                function_resp=func_message_2
+            )]
+
+    res = dte_run(query, chat_history, used_tool)
 
     final_message = ""
     for r in res:
@@ -334,7 +372,5 @@ if __name__ == '__main__':
     end_time = time.time()
     
     print("\nfinal_message: ", final_message)
-    print("总耗时：{}秒， 首轮对话耗时：{}秒， 函数本地执行耗时：{}秒， 第二轮对话执行耗时：{}秒。".format(
-        end_time - begin_time, first_time - begin_time, tool_eval_time - first_time, end_time - tool_eval_time))
 
 
